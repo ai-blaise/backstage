@@ -1,0 +1,5 @@
+remote=backstage/backstage
+branch=master
+base=813608335f8c6f35a9b95d90782a9cd9ef1a5109
+capturedAt=2026-05-20
+rebaseCadence=monthly
