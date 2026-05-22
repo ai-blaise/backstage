@@ -1,0 +1,6 @@
+packages/app-defaults
+packages/backend-defaults
+packages/catalog-model
+packages/core-app-api
+plugins/auth-backend-module-oidc-provider
+plugins/catalog
