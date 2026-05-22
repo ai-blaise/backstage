@@ -1,0 +1,152 @@
+name: Publish command-center packages
+
+on:
+  push:
+    branches: [command-center]
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: write
+
+concurrency:
+  group: publish-cc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish @backstage/* to GitHub Packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Read upstream rebase base
+        id: base
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f UPSTREAM_REBASE_BASE ]; then
+            echo "UPSTREAM_REBASE_BASE missing" >&2
+            exit 1
+          fi
+          BASE_SHA=$(grep '^base=' UPSTREAM_REBASE_BASE | cut -d= -f2)
+          if [ -z "$BASE_SHA" ]; then
+            echo "base= not found in UPSTREAM_REBASE_BASE" >&2
+            exit 1
+          fi
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Compute CC_REVISION
+        id: rev
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA='${{ steps.base.outputs.base_sha }}'
+          if ! git cat-file -e "$BASE_SHA"; then
+            git fetch --no-tags --depth=2147483647 origin "$BASE_SHA" || \
+              git fetch --no-tags --depth=2147483647 origin
+          fi
+          CC_REVISION=$(git rev-list --count "$BASE_SHA"..HEAD)
+          echo "cc_revision=$CC_REVISION" >> "$GITHUB_OUTPUT"
+          echo "CC_REVISION=$CC_REVISION"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22.x
+          registry-url: https://npm.pkg.github.com
+          scope: '@backstage'
+          always-auth: true
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Rewrite versions and publishConfig
+        id: rewrite
+        run: |
+          set -Eeuo pipefail
+          CC_REVISION='${{ steps.rev.outputs.cc_revision }}'
+          if [ -z "$CC_REVISION" ]; then
+            echo "CC_REVISION empty" >&2
+            exit 1
+          fi
+          if [ ! -f .github/cc-published-packages.txt ]; then
+            echo ".github/cc-published-packages.txt missing" >&2
+            exit 1
+          fi
+          PUBLISHED_PATHS=()
+          PUBLISHED_TUPLES=()
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            case "$p" in \#*) continue ;; esac
+            PKG="$p/package.json"
+            if [ ! -f "$PKG" ]; then
+              echo "Listed path $p has no package.json" >&2
+              exit 1
+            fi
+            BASE_VER=$(jq -r '.version' "$PKG")
+            NAME=$(jq -r '.name' "$PKG")
+            NEW_VER="${BASE_VER}-cc.${CC_REVISION}"
+            TMP=$(mktemp)
+            jq --arg v "$NEW_VER" '
+              .version = $v
+              | .publishConfig = ((.publishConfig // {}) + {
+                  registry: "https://npm.pkg.github.com",
+                  access: "restricted"
+                })
+            ' "$PKG" > "$TMP"
+            mv "$TMP" "$PKG"
+            echo "Rewrote $NAME: $BASE_VER -> $NEW_VER"
+            PUBLISHED_PATHS+=("$p")
+            PUBLISHED_TUPLES+=("$p|$NAME|$NEW_VER")
+          done < .github/cc-published-packages.txt
+          printf '%s\n' "${PUBLISHED_PATHS[@]}" > /tmp/cc-paths.txt
+          printf '%s\n' "${PUBLISHED_TUPLES[@]}" > /tmp/cc-tuples.txt
+
+      - name: Yarn install (immutable)
+        run: yarn install --immutable
+
+      - name: Type-check
+        run: yarn tsc
+
+      - name: Build
+        run: yarn build
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f /tmp/cc-paths.txt ]; then
+            echo "/tmp/cc-paths.txt missing" >&2
+            exit 1
+          fi
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            echo "Publishing $p"
+            (cd "$p" && npm publish --tag cc --access restricted)
+          done < /tmp/cc-paths.txt
+
+      - name: Tag and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          CC_REVISION='${{ steps.rev.outputs.cc_revision }}'
+          TAG="cc-publish-${CC_REVISION}"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally; refusing to overwrite" >&2
+            exit 0
+          fi
+          git tag -a "$TAG" -m "Command-center publish revision ${CC_REVISION}"
+          git push origin "$TAG"

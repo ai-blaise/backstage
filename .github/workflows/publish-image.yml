@@ -1,0 +1,172 @@
+name: Publish command-center container image
+
+on:
+  push:
+    branches: [command-center]
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/ai-blaise/backstage
+
+jobs:
+  publish-image:
+    name: Build and push command-center image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read upstream rebase base
+        id: base
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f UPSTREAM_REBASE_BASE ]; then
+            echo "UPSTREAM_REBASE_BASE missing" >&2
+            exit 1
+          fi
+          BASE_SHA=$(grep '^base=' UPSTREAM_REBASE_BASE | cut -d= -f2)
+          if [ -z "$BASE_SHA" ]; then
+            echo "base= not found in UPSTREAM_REBASE_BASE" >&2
+            exit 1
+          fi
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Compute CC_REVISION and base version
+        id: ver
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA='${{ steps.base.outputs.base_sha }}'
+          if ! git cat-file -e "$BASE_SHA"; then
+            git fetch --no-tags --depth=2147483647 origin "$BASE_SHA" || \
+              git fetch --no-tags --depth=2147483647 origin
+          fi
+          CC_REVISION=$(git rev-list --count "$BASE_SHA"..HEAD)
+          BASE_VER=$(jq -r '.version // empty' packages/backend/package.json)
+          if [ -z "$BASE_VER" ] || [ "$BASE_VER" = "null" ]; then
+            BASE_VER=$(jq -r '.version // empty' package.json)
+          fi
+          if [ -z "$BASE_VER" ] || [ "$BASE_VER" = "null" ]; then
+            BASE_VER="0.0.0"
+          fi
+          echo "cc_revision=$CC_REVISION" >> "$GITHUB_OUTPUT"
+          echo "base_ver=$BASE_VER" >> "$GITHUB_OUTPUT"
+          echo "CC_REVISION=$CC_REVISION  BASE_VER=$BASE_VER"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22.x
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Yarn install (immutable)
+        run: yarn install --immutable
+
+      - name: Build backend
+        run: yarn build:backend
+
+      - name: Detect Dockerfile
+        id: docker
+        run: |
+          set -Eeuo pipefail
+          DF="packages/backend/Dockerfile"
+          if [ ! -f "$DF" ]; then
+            echo "Backend Dockerfile not found at $DF" >&2
+            exit 1
+          fi
+          echo "dockerfile=$DF" >> "$GITHUB_OUTPUT"
+          echo "context=." >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: ${{ steps.docker.outputs.context }}
+          file: ${{ steps.docker.outputs.dockerfile }}
+          push: true
+          provenance: true
+          sbom: false
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:command-center-${{ steps.ver.outputs.base_ver }}-cc.${{ steps.ver.outputs.cc_revision }}
+            ${{ env.IMAGE }}:command-center-latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=command-center-${{ steps.ver.outputs.base_ver }}-cc.${{ steps.ver.outputs.cc_revision }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@cee1b8e05ae5b2593a75e197229729eabaa9f8ec # v0.20.7
+        with:
+          image: ${{ env.IMAGE }}:command-center-${{ steps.ver.outputs.base_ver }}-cc.${{ steps.ver.outputs.cc_revision }}
+          format: spdx-json
+          artifact-name: sbom-command-center-${{ steps.ver.outputs.base_ver }}-cc.${{ steps.ver.outputs.cc_revision }}.spdx.json
+          output-file: sbom.spdx.json
+
+      - name: Install Cosign
+        id: cosign-install
+        continue-on-error: true
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Cosign keyless sign image
+        if: steps.cosign-install.outcome == 'success'
+        continue-on-error: true
+        env:
+          COSIGN_EXPERIMENTAL: 'true'
+        run: |
+          set -Eeuo pipefail
+          DIGEST='${{ steps.build.outputs.digest }}'
+          if [ -z "$DIGEST" ]; then
+            echo "No image digest emitted; skipping cosign sign" >&2
+            exit 0
+          fi
+          cosign sign --yes "${{ env.IMAGE }}@${DIGEST}" || {
+            echo "Cosign keyless sign failed (Sigstore likely unwired); skipping" >&2
+            exit 0
+          }
+
+      - name: Cosign keyless attest SBOM
+        if: steps.cosign-install.outcome == 'success'
+        continue-on-error: true
+        env:
+          COSIGN_EXPERIMENTAL: 'true'
+        run: |
+          set -Eeuo pipefail
+          DIGEST='${{ steps.build.outputs.digest }}'
+          if [ -z "$DIGEST" ] || [ ! -f sbom.spdx.json ]; then
+            echo "Missing digest or SBOM; skipping attestation" >&2
+            exit 0
+          fi
+          cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${{ env.IMAGE }}@${DIGEST}" || {
+            echo "Cosign keyless attest failed (Sigstore likely unwired); skipping" >&2
+            exit 0
+          }
