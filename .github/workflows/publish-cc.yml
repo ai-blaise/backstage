@@ -96,23 +96,17 @@ jobs:
             NAME=$(jq -r '.name' "$PKG")
             NEW_VER="${BASE_VER}-cc.${CC_REVISION}"
             TMP=$(mktemp)
-            # Rename @backstage/<x> -> @ai-blaise/backstage-<x> so GitHub Packages
-            # accepts the publish under the ai-blaise org's scope (publishing
-            # @backstage/* from ai-blaise/backstage 403s with permission_denied
-            # since only the upstream backstage org owns that scope).
-            NEW_NAME=$(echo "$NAME" | sed 's|^@backstage/|@ai-blaise/backstage-|')
-            jq --arg v "$NEW_VER" --arg n "$NEW_NAME" '
-              .name = $n
-              | .version = $v
+            jq --arg v "$NEW_VER" '
+              .version = $v
               | .publishConfig = ((.publishConfig // {}) + {
                   registry: "https://npm.pkg.github.com",
                   access: "restricted"
                 })
             ' "$PKG" > "$TMP"
             mv "$TMP" "$PKG"
-            echo "Rewrote $NAME -> $NEW_NAME: $BASE_VER -> $NEW_VER"
+            echo "Rewrote $NAME: $BASE_VER -> $NEW_VER"
             PUBLISHED_PATHS+=("$p")
-            PUBLISHED_TUPLES+=("$p|$NEW_NAME|$NEW_VER")
+            PUBLISHED_TUPLES+=("$p|$NAME|$NEW_VER")
           done < .github/cc-published-packages.txt
           printf '%s\n' "${PUBLISHED_PATHS[@]}" > /tmp/cc-paths.txt
           printf '%s\n' "${PUBLISHED_TUPLES[@]}" > /tmp/cc-tuples.txt
@@ -135,6 +129,48 @@ jobs:
             echo "Building $p"
             (cd "$p" && yarn run build)
           done < /tmp/cc-paths.txt
+
+      - name: Rename @backstage/* -> @ai-blaise/backstage-* (for publish)
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PYEOF'
+          import json, pathlib
+          paths = pathlib.Path("/tmp/cc-paths.txt").read_text().splitlines()
+          name_map = {}
+          for p in paths:
+              if not p.strip():
+                  continue
+              pkg = json.loads(pathlib.Path(f"{p}/package.json").read_text())
+              orig = pkg["name"]
+              new = orig.replace("@backstage/", "@ai-blaise/backstage-", 1)
+              name_map[orig] = new
+          def rewrite_deps(deps):
+              if not deps:
+                  return deps
+              return {name_map.get(k, k): v for k, v in deps.items()}
+          for p in paths:
+              if not p.strip():
+                  continue
+              pkg_path = pathlib.Path(f"{p}/package.json")
+              pkg = json.loads(pkg_path.read_text())
+              old_name = pkg["name"]
+              new_name = name_map[old_name]
+              pkg["name"] = new_name
+              for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                  if field in pkg:
+                      pkg[field] = rewrite_deps(pkg[field])
+              pkg_path.write_text(json.dumps(pkg, indent=2) + "\n")
+              print(f"Renamed {old_name} -> {new_name} in {p}/package.json")
+          # Also re-emit /tmp/cc-tuples.txt with the new names so publish + tag steps see them.
+          tuples_path = pathlib.Path("/tmp/cc-tuples.txt")
+          new_tuples = []
+          for line in tuples_path.read_text().splitlines():
+              if "|" not in line:
+                  continue
+              p, name, ver = line.split("|", 2)
+              new_tuples.append(f"{p}|{name_map.get(name, name)}|{ver}")
+          tuples_path.write_text("\n".join(new_tuples) + "\n")
+          PYEOF
 
       - name: Publish to GitHub Packages
         env:
