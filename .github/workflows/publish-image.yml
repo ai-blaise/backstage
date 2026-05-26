@@ -170,3 +170,16 @@ jobs:
             echo "Cosign keyless attest failed (Sigstore likely unwired); skipping" >&2
             exit 0
           }
+
+      - name: Make GHCR backstage package public (best-effort; needs admin:org)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          # Try org-scoped first (preferred), fall back to user-scoped.
+          gh api -X PATCH /orgs/ai-blaise/packages/container/backstage -f visibility=public 2>&1 \
+            || gh api -X PATCH /user/packages/container/backstage -f visibility=public 2>&1 \
+            || echo "visibility flip skipped: GITHUB_TOKEN lacks admin:org / write:packages-admin scope. One-time manual flip needed by a PAT with the right scope; subsequent re-publishes preserve the public setting."
+

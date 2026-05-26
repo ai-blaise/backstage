@@ -202,3 +202,27 @@ jobs:
           fi
           git tag -a "$TAG" -m "Command-center publish revision ${CC_REVISION}"
           git push origin "$TAG"
+
+      - name: Make published @ai-blaise/* npm packages public (best-effort)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f /tmp/cc-tuples.txt ]; then
+            echo "/tmp/cc-tuples.txt missing — skip flip"
+            exit 0
+          fi
+          while IFS='|' read -r path name version; do
+            [ -z "$name" ] && continue
+            # url-encode the @scope/name -> @scope%2Fname for the package path
+            encoded=$(printf '%s' "$name" | sed 's|/|%2F|')
+            # Strip the leading @ for the API (GitHub Packages npm uses scope without @ in URL)
+            api_name="${encoded#@}"
+            echo "→ flipping $name to public ($api_name)"
+            gh api -X PATCH "/orgs/ai-blaise/packages/npm/${api_name}" -f visibility=public 2>&1 \
+              || gh api -X PATCH "/user/packages/npm/${api_name}" -f visibility=public 2>&1 \
+              || echo "  skipped: token lacks scope"
+          done < /tmp/cc-tuples.txt
+
