@@ -63,7 +63,7 @@ jobs:
         with:
           node-version: 22.x
           registry-url: https://npm.pkg.github.com
-          scope: '@backstage'
+          scope: '@ai-blaise'
           always-auth: true
 
       - name: Enable corepack
@@ -96,17 +96,23 @@ jobs:
             NAME=$(jq -r '.name' "$PKG")
             NEW_VER="${BASE_VER}-cc.${CC_REVISION}"
             TMP=$(mktemp)
-            jq --arg v "$NEW_VER" '
-              .version = $v
+            # Rename @backstage/<x> -> @ai-blaise/backstage-<x> so GitHub Packages
+            # accepts the publish under the ai-blaise org's scope (publishing
+            # @backstage/* from ai-blaise/backstage 403s with permission_denied
+            # since only the upstream backstage org owns that scope).
+            NEW_NAME=$(echo "$NAME" | sed 's|^@backstage/|@ai-blaise/backstage-|')
+            jq --arg v "$NEW_VER" --arg n "$NEW_NAME" '
+              .name = $n
+              | .version = $v
               | .publishConfig = ((.publishConfig // {}) + {
                   registry: "https://npm.pkg.github.com",
                   access: "restricted"
                 })
             ' "$PKG" > "$TMP"
             mv "$TMP" "$PKG"
-            echo "Rewrote $NAME: $BASE_VER -> $NEW_VER"
+            echo "Rewrote $NAME -> $NEW_NAME: $BASE_VER -> $NEW_VER"
             PUBLISHED_PATHS+=("$p")
-            PUBLISHED_TUPLES+=("$p|$NAME|$NEW_VER")
+            PUBLISHED_TUPLES+=("$p|$NEW_NAME|$NEW_VER")
           done < .github/cc-published-packages.txt
           printf '%s\n' "${PUBLISHED_PATHS[@]}" > /tmp/cc-paths.txt
           printf '%s\n' "${PUBLISHED_TUPLES[@]}" > /tmp/cc-tuples.txt
