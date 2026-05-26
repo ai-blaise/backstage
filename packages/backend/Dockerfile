@@ -47,7 +47,11 @@ COPY --chown=node:node .yarnrc.yml ./
 COPY --chown=node:node yarn.lock package.json packages/backend/dist/skeleton.tar.gz ./
 RUN tar xzf skeleton.tar.gz && rm skeleton.tar.gz
 
-RUN --mount=type=cache,target=/home/node/.yarn/berry/cache,sharing=locked,uid=1000,gid=1000 \
+# Widen cache mount to /home/node/.yarn so yarn 4 can also mkdir its
+# berry/index/ + berry/install-state etc (the upstream pattern hit
+# EACCES on index/ because the narrower /home/node/.yarn/berry/cache
+# target left the parent owned by root).
+RUN --mount=type=cache,target=/home/node/.yarn,sharing=locked,uid=1000,gid=1000 \
     yarn workspaces focus --all --production
 
 # Then copy the rest of the backend bundle, along with any other files we might want.
