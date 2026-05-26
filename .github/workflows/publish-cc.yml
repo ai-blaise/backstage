@@ -156,6 +156,16 @@ jobs:
               old_name = pkg["name"]
               new_name = name_map[old_name]
               pkg["name"] = new_name
+              # Rewrite repository so GitHub Packages auto-links the published
+              # npm package to ai-blaise/backstage (which is PUBLIC), inheriting
+              # public visibility. Without this rewrite, packages remain private
+              # because their repository.url points at the upstream backstage
+              # org repo.
+              pkg["repository"] = {
+                  "type": "git",
+                  "url": "git+https://github.com/ai-blaise/backstage.git",
+                  "directory": p,
+              }
               for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
                   if field in pkg:
                       pkg[field] = rewrite_deps(pkg[field])
