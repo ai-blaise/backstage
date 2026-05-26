@@ -117,8 +117,18 @@ jobs:
       - name: Type-check
         run: yarn tsc
 
-      - name: Build
-        run: yarn build
+      - name: Build published packages
+        run: |
+          set -Eeuo pipefail
+          if [ ! -f /tmp/cc-paths.txt ]; then
+            echo "/tmp/cc-paths.txt missing" >&2
+            exit 1
+          fi
+          while IFS= read -r p; do
+            [ -z "$p" ] && continue
+            echo "Building $p"
+            (cd "$p" && yarn run build)
+          done < /tmp/cc-paths.txt
 
       - name: Publish to GitHub Packages
         env:
